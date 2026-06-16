@@ -6,6 +6,7 @@ import json
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+from PIL import Image  
 
 # --- CẤU HÌNH ---
 load_dotenv()
@@ -85,7 +86,6 @@ with tab1:
         st.info("Chưa có dữ liệu, hãy sang tab 'Luyện đề'!")
 
 # --- TAB 2: LỘ TRÌNH AI ---
-# --- TAB 2: LỘ TRÌNH AI (Đã sửa logic) ---
 with tab2:
     st.subheader("Lộ trình học cá nhân hóa")
     if st.button("Tạo lộ trình mới"):
@@ -130,31 +130,44 @@ with tab2:
                 st.markdown(res.text)
 
 # --- TAB 3: CHẤM BÀI ---
+
+
 with tab3:
-    st.subheader("📝 Chấm bài IELTS AI")
+    st.subheader("📝 Chấm bài IELTS AI (Hỗ trợ phân tích ảnh biểu đồ Task 1)")
 
     task = st.selectbox("Loại bài", ["Writing Task 1", "Writing Task 2", "Speaking Script"])
-    content = st.text_area("Dán nội dung:", height=250)
+    
+    # Ô nhập bài viết dạng Text
+    content = st.text_area("Dán bài viết của bạn tại đây:", height=200, placeholder="Nhập bài viết Task 1 / Task 2...")
+    
+    # Ô up ảnh đề bài (Biểu đồ, bảng biểu...)
+    uploaded_file = st.file_uploader("Tải lên ảnh biểu đồ/đề bài (Đặc biệt cần thiết cho Task 1):", type=["png", "jpg", "jpeg"])
+    
+    uploaded_image = None
+    if uploaded_file is not None:
+        uploaded_image = Image.open(uploaded_file)
+        # Hiển thị ảnh thu nhỏ trên giao diện để người dùng kiểm tra
+        st.image(uploaded_image, caption="Ảnh đề bài/biểu đồ đã tải lên", width=350)
 
     if st.button("Chấm điểm"):
+        # Kiểm tra nếu chưa nhập bài viết
         if not content.strip():
-            st.warning("Chưa có nội dung bài làm!")
+            st.warning("Vui lòng nhập nội dung bài viết trước khi chấm!")
             st.stop()
 
+        # Prompt tinh chỉnh để ép Gemini bắt buộc phải nhìn ảnh biểu đồ (nếu có) để đối chiếu số liệu
         prompt = f"""
         You are an expert IELTS examiner.
+        
+        Task Type: {task}
+        
+        Instructions:
+        1. If an image is provided (especially for Writing Task 1), it contains the chart/graph/table of the prompt.
+        2. Carefully analyze the data, trends, and figures in the image chart, then cross-check it with the student's written response.
+        3. Point out any data misinterpretations, missing key trends, or incorrect figures in their writing based on the chart.
+        4. Evaluate strictly based on 4 IELTS criteria: Task Achievement/Response, Coherence & Cohesion, Lexical Resource, Grammatical Range & Accuracy.
 
-        Task: {task}
-
-        Evaluate the student answer strictly based on IELTS criteria:
-        - Task Achievement / Task Response
-        - Coherence and Cohesion
-        - Lexical Resource
-        - Grammatical Range and Accuracy
-
-        Return ONLY valid JSON.
-        No markdown.
-        No explanation outside JSON.
+        Return ONLY valid JSON. No markdown block. No extra explanation outside JSON.
 
         JSON format:
         {{
@@ -163,16 +176,21 @@ with tab3:
             "LR": number,
             "GRA": number,
             "overall": number,
-            "feedback": "string",
-            "improvement": "string"
+            "feedback": "Detailed feedback in Vietnamese. If Task 1, specifically comment on how well they analyzed the chart data.",
+            "improvement": "Actionable advice in Vietnamese to score higher next time"
         }}
 
-        Student answer:
+        Student's Essay Content:
         {content}
         """
 
-        with st.spinner("AI đang chấm bài..."):
-            res = model.generate_content(prompt)
+        with st.spinner("AI đang phân tích biểu đồ và chấm bài viết..."):
+            # Truyền đồng thời cả prompt chữ, bài làm văn và ảnh biểu đồ đề bài vào Gemini
+            if uploaded_image is not None:
+                res = model.generate_content([prompt, uploaded_image])
+            else:
+                res = model.generate_content(prompt)
+                
             raw = res.text.strip()
 
             # ---- CLEAN OUTPUT ----
@@ -181,12 +199,10 @@ with tab3:
 
             try:
                 result = json.loads(raw)
-
                 st.success("Đã chấm xong!")
 
                 # ---- DISPLAY SCORE ----
                 st.subheader("📊 Band Score")
-
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric("TA/TR", result.get("TA_TR", 0))
                 col2.metric("CC", result.get("CC", 0))
@@ -194,29 +210,26 @@ with tab3:
                 col4.metric("GRA", result.get("GRA", 0))
 
                 st.metric("Overall", result.get("overall", 0))
-
                 st.divider()
 
                 # ---- FEEDBACK ----
-                st.subheader("💬 Feedback")
+                st.subheader("💬 Phân tích chi tiết & Feedback")
                 st.write(result.get("feedback", ""))
 
-                st.subheader("🔧 Cần cải thiện")
+                st.subheader("🔧 Lời khuyên cải thiện")
                 st.write(result.get("improvement", ""))
 
                 # ---- SAVE TO DB ----
                 db = load_db()
-
                 db[st.session_state.username]["history"].append({
                     "date": str(datetime.today().date()),
                     "skill": "Writing" if "Writing" in task else "Speaking",
                     "score": float(result.get("overall", 0))
                 })
-
                 save_db(db)
 
             except Exception:
-                st.error("❌ AI trả về sai định dạng JSON")
+                st.error("❌ AI gặp lỗi khi xử lý dữ liệu. Vui lòng thử lại.")
                 st.code(raw)
 
 # --- TAB 4: LUYỆN ĐỀ ---
